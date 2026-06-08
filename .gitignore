@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Ruff
+.ruff_cache/
+
+# Data and artifacts of training (NOT included in the repo)
+data/
+outputs/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
