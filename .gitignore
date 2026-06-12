@@ -13,7 +13,8 @@ wheels/
 .ruff_cache/
 
 # Data and artifacts of training (NOT included in the repo)
-data/
+data/raw/
+data/processed/
 outputs/
 
 # Notebooks
