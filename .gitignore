@@ -22,3 +22,6 @@ outputs/
 
 # macOS
 .DS_Store
+
+# Runs
+runs/**/*.pt
