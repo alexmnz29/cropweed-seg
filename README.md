@@ -12,7 +12,7 @@ competitive with what published work reports on the same dataset.
 ## Pipeline
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Raw dataset<br>400 RGB 960x720] --> B[prepare_data.py<br>RGB to index masks<br>stratified split]
     B --> C[PeanutDataset<br>512 crops + norm]
     C --> D[Training<br>U-Net ResNet34<br>focal+dice]
