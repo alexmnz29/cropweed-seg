@@ -1,0 +1,10 @@
+{
+  "architecture": "unet",
+  "encoder": "resnet34",
+  "loss": "focal_dice",
+  "crop_size": 768,
+  "seed": 42,
+  "epochs": 25,
+  "batch_size": 8,
+  "learning_rate": 0.0001
+}

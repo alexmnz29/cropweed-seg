@@ -1,16 +1,15 @@
-"""Train the baseline U-Net on the peanut dataset.
+"""Train a segmentation model on the peanut dataset.
 
-U-Net with a ResNet34 encoder pretrained on ImageNet, cross-entropy weighted
-by inverse class frequency (computed from the train split), per-class IoU on
-validation each epoch. Best checkpoint is kept by validation mIoU; weed IoU is
-reported as the bottleneck class to watch but is too noisy per-epoch to select
-on. Run with: uv run scripts/train.py
+Architecture, loss, crop size, and hyperparameters are set as constants below
+and written to runs/<name>/config.json next to the checkpoint, so evaluate.py
+can rebuild the right model without being told which architecture to use. Best
+checkpoint is kept by validation mIoU. Run with: uv run scripts/train.py
 """
 
+import json
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from cropweed_seg.dataset import PeanutDataset
@@ -21,16 +20,21 @@ from cropweed_seg.engine import (
     train_one_epoch,
     write_metrics_csv,
 )
+from cropweed_seg.losses import build_criterion
 from cropweed_seg.metrics import ConfusionMatrixMetric
 from cropweed_seg.model import build_model
 from cropweed_seg.transforms import build_transforms
 
 ROOT = Path(__file__).resolve().parent.parent
 
-RUN_NAME = "baseline"
+RUN_NAME = "unet_focal_dice_crop720"
+ARCH = "unet"
+ENCODER = "resnet34"
+LOSS = "focal_dice"
+CROP_SIZE = 720
 SEED = 42
 BATCH_SIZE = 8
-N_EPOCHS = 15
+N_EPOCHS = 25
 LEARNING_RATE = 1e-4
 
 
@@ -46,11 +50,24 @@ def main() -> None:
     print(f"device: {device}")
 
     run_dir = ROOT / "runs" / RUN_NAME
+    run_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "architecture": ARCH,
+        "encoder": ENCODER,
+        "loss": LOSS,
+        "crop_size": CROP_SIZE,
+        "seed": SEED,
+        "epochs": N_EPOCHS,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+    }
+    (run_dir / "config.json").write_text(json.dumps(config, indent=2))
+
     generator = torch.Generator()
     generator.manual_seed(SEED)
 
     train_loader = DataLoader(
-        PeanutDataset(ROOT, "train", build_transforms("train")),
+        PeanutDataset(ROOT, "train", build_transforms("train", crop_size=CROP_SIZE)),
         batch_size=BATCH_SIZE,
         shuffle=True,
         generator=generator,
@@ -61,8 +78,8 @@ def main() -> None:
         shuffle=False,
     )
 
-    model = build_model().to(device)
-    criterion = nn.CrossEntropyLoss(weight=compute_class_weights(ROOT, device))
+    model = build_model(architecture=ARCH, encoder_name=ENCODER).to(device)
+    criterion = build_criterion(LOSS, compute_class_weights(ROOT, device), device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     metric = ConfusionMatrixMetric()
 
@@ -88,7 +105,6 @@ def main() -> None:
         marker = ""
         if iou["miou"] > best_miou:
             best_miou = iou["miou"]
-            run_dir.mkdir(parents=True, exist_ok=True)
             torch.save(model.state_dict(), run_dir / "model.pt")
             marker = "  <- best mIoU, saved"
 
@@ -100,7 +116,7 @@ def main() -> None:
 
     write_metrics_csv(run_dir / "metrics.csv", history)
     print(f"\nbest mIoU: {best_miou:.4f}")
-    print(f"checkpoint and metrics in {run_dir}")
+    print(f"checkpoint, config and metrics in {run_dir}")
 
 
 if __name__ == "__main__":
