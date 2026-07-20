@@ -6,8 +6,9 @@ reproducible preprocessing, a measured loss-function study, honest per-class
 evaluation, and edge deployment on Jetson.
 
 **Headline result:** weed IoU 0.670, mIoU 0.850 on the held-out test set, with a
-U-Net trained on a 3.7%-weed dataset. weed is the hard class, and the result is
-competitive with what published work reports on the same dataset.
+U-Net trained on a 3.7%-weed dataset, running at 72 fps INT8 on a Jetson Orin
+Nano. weed is the hard class, and the accuracy is competitive with what
+published work reports on the same dataset.
 
 ## Pipeline
 
@@ -18,7 +19,7 @@ flowchart TD
     C --> D[Training<br>U-Net ResNet34<br>focal+dice]
     D --> E[Evaluation<br>per-class IoU]
     E --> F[Champion<br>test weed 0.670]
-    F --> G[Edge deploy<br>ONNX-TensorRT-INT8<br>Jetson Orin Nano]
+    F --> G[Edge deploy<br>ONNX-TensorRT-INT8<br>Jetson Orin Nano, 72 fps]
 ```
 
 ## The problem
@@ -137,8 +138,57 @@ practical ceiling, not as a weak result.
 
 ## Deployment
 
-> Edge deployment on Jetson Orin Nano (ONNX → TensorRT → INT8): in progress.
-> Will report latency benchmarks and per-class accuracy drop after quantization.
+The champion is exported to ONNX, quantized to INT8, and deployed as TensorRT
+engines on a Jetson Orin Nano Super. Each conversion step is verified before it
+is trusted, the same principle as the lossless mask round-trip in notebook 01.
+
+**ONNX export.** The PyTorch model exports to ONNX (fixed 1x3x720x960 input,
+full-frame inference). Fidelity is checked three ways: numerical equivalence on a
+random input (max difference ~1e-5), exact prediction agreement (100%), and
+matching per-class IoU on the test split (weed 0.670, identical to PyTorch). The
+classic TorchScript exporter is used over the dynamo exporter for maturity of the
+ONNX to TensorRT path.
+
+**INT8 quantization (ONNX Runtime).** Static quantization (QDQ, MinMax
+calibration from 50 train images, no val/test leak) cuts the model from 97.7 MB
+to 24.6 MB, a 3.98x reduction. Per-class accuracy drop on test is essentially
+zero:
+
+| class | fp32 IoU | int8 IoU | drop |
+| --- | --- | --- | --- |
+| background | 0.9711 | 0.9710 | +0.0001 |
+| crop | 0.9096 | 0.9095 | +0.0001 |
+| weed | 0.6695 | 0.6696 | -0.0001 |
+| mIoU | 0.8500 | 0.8500 | 0.0000 |
+
+The hard class survives quantization without measurable loss. Three calibration
+methods (MinMax, Entropy, Percentile) were compared on the same calibration set;
+none improves on MinMax, which confirms the activations carry no problematic
+outliers. Documented in the calibration ADR.
+
+**TensorRT engines on device.** Both engines are built on the Jetson from the
+fp32 ONNX. INT8 calibrates with TensorRT's entropy calibrator over the same 50
+train images. Engine sizes follow the precision arithmetic: 97.7 MB fp32, 49.4
+MB fp16, 25.1 MB int8.
+
+**Latency benchmark.** Median and P95 over 500 timed inferences after 50 warmup
+iterations, timing GPU inference only (copies and argmax outside the timed
+region), one full 960x720 frame per inference:
+
+| engine | size | median | P95 | throughput | weed IoU | mIoU |
+| --- | --- | --- | --- | --- | --- | --- |
+| FP16 | 49.4 MB | 22.38 ms | 22.40 ms | 44.7 fps | 0.6695 | 0.8500 |
+| INT8 | 25.1 MB | 13.88 ms | 13.89 ms | 72.0 fps | 0.6689 | 0.8497 |
+
+INT8 is 1.61x faster than FP16, and its weed IoU drop on device is 0.0006, noise
+territory. Median and P95 sit 0.02 ms apart on both engines: with the board
+state fixed, latency is stable enough that the tail collapses onto the typical
+case. PyTorch, ONNX, and the on-device FP16 engine agree on test to four
+decimals.
+
+**Measurement environment.** Jetson Orin Nano Super 8GB, JetPack 6.2, TensorRT
+10.3.0, nvpmodel MAXN_SUPER (mode 2), jetson_clocks active, cuda-python 12.x,
+torch CPU for the data pipeline only. Raw results in `results/benchmark.json`.
 
 ## Scope decisions and future work
 
@@ -151,6 +201,9 @@ practical ceiling, not as a weak result.
   isolate generalization from class mismatch.
 - **Edge-guided segmentation** (a boundary loss or edge branch) could target the
   fine-structure errors, but faces the same data ceiling.
+- **TensorRT 10.3 vs newer releases.** The engines were built and measured on
+  JetPack 6.2. Rebuilding on a newer JetPack would isolate how much the stack
+  alone improves latency, with no model changes.
 
 ## Reproducibility
 
@@ -171,6 +224,9 @@ uv run scripts/train.py                 # train (config in the script header)
 uv run scripts/evaluate.py --run focal_dice_s42 --split test
 uv run pytest                           # run the test suite
 ```
+
+Jetson deployment (build engines and benchmark on the device) is documented in
+`docs/deployment_runbook.md`.
 
 Each training run writes its config, checkpoint, and per-epoch metrics to
 `runs/<name>/`. Decisions are documented in `docs/decisions/`.

@@ -25,3 +25,5 @@ outputs/
 
 # Runs
 runs/**/*.pt
+runs/**/*.onnx
+runs/**/*_int8.onnx
