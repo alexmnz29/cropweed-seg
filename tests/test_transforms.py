@@ -31,6 +31,26 @@ def test_all_splits_normalize():
         assert v2.Normalize in transform_types
 
 
+def test_augment_adds_flips_to_train_only():
+    transform = build_transforms("train", augment=True)
+    transform_types = [type(t) for t in transform.transforms]
+    assert v2.RandomHorizontalFlip in transform_types
+    assert v2.RandomVerticalFlip in transform_types
+
+    for split in ("val", "test"):
+        transform = build_transforms(split, augment=True)
+        transform_types = [type(t) for t in transform.transforms]
+        assert v2.RandomHorizontalFlip not in transform_types
+        assert v2.RandomVerticalFlip not in transform_types
+
+
+def test_no_flips_by_default():
+    transform = build_transforms("train")
+    transform_types = [type(t) for t in transform.transforms]
+    assert v2.RandomHorizontalFlip not in transform_types
+    assert v2.RandomVerticalFlip not in transform_types
+
+
 def test_unknown_split_raises():
     with pytest.raises(ValueError, match="unknown split"):
         build_transforms("trian")  # typo on purpose

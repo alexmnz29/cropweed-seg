@@ -27,15 +27,17 @@ from cropweed_seg.transforms import build_transforms
 
 ROOT = Path(__file__).resolve().parent.parent
 
-RUN_NAME = "unet_focal_dice_crop720"
+RUN_NAME = "unet_focal_dice_crop768"
 ARCH = "unet"
 ENCODER = "resnet34"
-LOSS = "focal_dice"
-CROP_SIZE = 720
+LOSS = "weighted_ce"
+CROP_SIZE = 768
 SEED = 42
 BATCH_SIZE = 8
 N_EPOCHS = 25
 LEARNING_RATE = 1e-4
+AUGMENT = "none"  # champion config: the curve isolates data volume, nothing else
+TRAIN_SPLIT = "train"  # "train_p25" | "train_p50" | "train_p75" | "train" (100%)
 
 
 def main() -> None:
@@ -50,6 +52,8 @@ def main() -> None:
     print(f"device: {device}")
 
     run_dir = ROOT / "runs" / RUN_NAME
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise SystemExit(f"{run_dir} already exists; change RUN_NAME or clear it.")
     run_dir.mkdir(parents=True, exist_ok=True)
     config = {
         "architecture": ARCH,
@@ -60,6 +64,8 @@ def main() -> None:
         "epochs": N_EPOCHS,
         "batch_size": BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
+        "augment": AUGMENT,
+        "train_split": TRAIN_SPLIT,
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
 
@@ -67,7 +73,11 @@ def main() -> None:
     generator.manual_seed(SEED)
 
     train_loader = DataLoader(
-        PeanutDataset(ROOT, "train", build_transforms("train", crop_size=CROP_SIZE)),
+        PeanutDataset(
+            ROOT,
+            TRAIN_SPLIT,
+            build_transforms("train", crop_size=CROP_SIZE, augment=AUGMENT),
+        ),
         batch_size=BATCH_SIZE,
         shuffle=True,
         generator=generator,
