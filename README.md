@@ -50,8 +50,10 @@ Splits are seeded and versioned so the experiments are reproducible.
 - **Model:** U-Net with a ResNet34 encoder pretrained on ImageNet, via
   segmentation-models-pytorch. A standard, well-understood baseline rather than a
   hand-rolled architecture.
-- **Training:** 512x512 random crops at native resolution, full-frame evaluation,
-  ImageNet normalization, Adam, seeded runs.
+- **Training:** 512x512 random crops, full-frame evaluation, ImageNet
+  normalization, batch 8, Adam at 1e-4, 25 epochs, seeded runs, checkpoint
+  selection by best validation mIoU. Trained on Apple Silicon (MPS), roughly
+  ten minutes per run.
 - **Loss:** focal + Dice, chosen by a measured study (below).
 - **Evaluation:** per-class IoU from a confusion matrix accumulated over the
   whole split, never aggregate mIoU alone. With 29.5% of images lacking crop,
@@ -62,18 +64,22 @@ Splits are seeded and versioned so the experiments are reproducible.
 
 ### Loss study
 
-Four imbalance-handling strategies, all at the best mIoU epoch, same split and
-seed handling. focal and focal+dice were run to convergence at 25 epochs.
+Four imbalance-handling strategies, same split and seed handling, all run to
+convergence at the same 25-epoch budget, reported at each run's best
+validation mIoU epoch:
 
 | loss | mIoU | weed IoU |
 | --- | --- | --- |
-| weighted cross-entropy | 0.768 | 0.496 |
+| weighted cross-entropy | 0.768 | 0.490 |
 | focal | 0.840 | 0.650 |
-| dice | 0.838 | 0.643 |
+| dice | 0.844 | 0.660 |
 | **focal + dice** | **0.849** | **0.670** |
 
 focal+dice wins, reproducible across two seeds (weed 0.670 both times). The
-improvement over the weighted cross-entropy baseline is +0.174 weed IoU.
+improvement over the weighted cross-entropy baseline is +0.180 weed IoU. An
+earlier 15-epoch version of this study ranked the losses differently: dice and
+focal+dice had not converged at that budget, which is why every comparison
+here is made at the plateau. Documented in the loss ADR.
 
 ### Test set
 
@@ -97,31 +103,51 @@ untouched until the end.
 The worst cases share a pattern: the model misses thin, filamentous,
 low-contrast weed (teal in the error map), while segmenting compact weed and
 crop well. Errors are dominated by false negatives on fine structures, not class
-confusion.
+confusion. Per-image test weed IoU spans 0.355 to 0.855; the bottom of that
+range is where the thin weed lives.
 
 ## The ceiling
 
 ```mermaid
 flowchart TD
-    A[Baseline<br>weighted CE<br>weed 0.496] --> B{Loss study}
-    B --> C[focal<br>weed 0.650]
-    B --> D[dice<br>weed 0.643]
+    A[Baseline<br>weighted CE<br>weed 0.490] --> B{Loss study}
     B --> E[focal+dice<br>weed 0.670]
     E --> F{Push further?}
-    F --> G[DeepLabV3+<br>weed 0.655<br>no gain]
-    F --> H[crop 720<br>weed 0.659<br>no gain]
-    G --> I[Ceiling ~0.67<br>three levers converge<br>limit is data + ambiguity]
+    F --> G[Architecture<br>DeepLabV3+<br>0.655, no gain]
+    F --> H[Resolution<br>crop 720<br>0.659, no gain]
+    F --> J[Augmentation<br>flips + jitter<br>0.671, no gain]
+    G --> I[Ceiling ~0.67<br>four levers converge]
     H --> I
-    E --> I
+    J --> I
+    I --> K[Learning curve<br>weed still climbing<br>at 100% of the data]
+    K --> L[Limit is the data,<br>measured not argued]
 ```
 
-weed converges around 0.67 across three independent levers: loss (the study
-above), architecture (DeepLabV3+, no improvement), and input resolution (720
-crops, no improvement). Three levers converging is strong evidence the limit is
-the task on this dataset, not a single model choice.
+weed converges around 0.67 across four independent levers: loss (the study
+above), architecture (DeepLabV3+), input resolution (crop 720, the largest
+square crop a 960x720 frame admits), and augmentation (flips plus mild color
+jitter targeting the diagnosed photometric failure mode, run to convergence at
+35 epochs). Four levers converging is strong evidence the limit is the task on
+this dataset, not a single model choice. Because the augmented candidate never
+beat the champion on validation, it never touched the test split.
 
-The likely cause is intrinsic ambiguity plus data size. Thin low-contrast stems
-are genuinely hard to separate, and 400 images give few examples to learn from.
+The learning curve then measures the limit directly: retraining the champion
+configuration on stratified, nested fractions of the train split at an equal
+optimizer-step budget (~875 steps per run):
+
+| fraction | images | weed IoU (val, best epoch) |
+| --- | --- | --- |
+| 25% | 70 | 0.621 |
+| 50% | 140 | 0.639 |
+| 75% | 210 | 0.648 |
+| 100% | 280 | 0.670 |
+
+Background stays flat across the curve and crop barely moves; the minority
+class absorbs essentially all the benefit of more data, and the steepest
+segment is the last one. At 100% of the data the slope is still positive: the
+ceiling belongs to the data, not the model. One caveat: all images come from
+one region and camera, so volume and diversity are partially confounded.
+
 This reading matches the dataset authors and later work on the same data:
 
 - PSPEdgeWeedNet (Pai et al., Sci Rep 2025) reports weed as the lowest-scoring
@@ -143,11 +169,11 @@ engines on a Jetson Orin Nano Super. Each conversion step is verified before it
 is trusted, the same principle as the lossless mask round-trip in notebook 01.
 
 **ONNX export.** The PyTorch model exports to ONNX (fixed 1x3x720x960 input,
-full-frame inference). Fidelity is checked three ways: numerical equivalence on a
-random input (max difference ~1e-5), exact prediction agreement (100%), and
-matching per-class IoU on the test split (weed 0.670, identical to PyTorch). The
-classic TorchScript exporter is used over the dynamo exporter for maturity of the
-ONNX to TensorRT path.
+full-frame inference, opset 17). Fidelity is checked three ways: numerical
+equivalence on a random input (max difference ~1e-5), exact prediction
+agreement (100%), and matching per-class IoU on the test split (weed 0.670,
+identical to PyTorch). The classic TorchScript exporter is used over the dynamo
+exporter for maturity of the ONNX to TensorRT path.
 
 **INT8 quantization (ONNX Runtime).** Static quantization (QDQ, MinMax
 calibration from 50 train images, no val/test leak) cuts the model from 97.7 MB
@@ -186,7 +212,7 @@ state fixed, latency is stable enough that the tail collapses onto the typical
 case. PyTorch, ONNX, and the on-device FP16 engine agree on test to four
 decimals.
 
-**Measurement environment.** Jetson Orin Nano Super 8GB, JetPack 6.2, TensorRT
+**Measurement environment.** Jetson Orin Nano Super 8GB, JetPack 6.2.1, TensorRT
 10.3.0, nvpmodel MAXN_SUPER (mode 2), jetson_clocks active, cuda-python 12.x,
 torch CPU for the data pipeline only. Raw results in `results/benchmark.json`.
 
@@ -194,15 +220,16 @@ torch CPU for the data pipeline only. Raw results in `results/benchmark.json`.
 
 - **Experiment tracking** used versioned CSVs, not MLflow, given the small number
   of runs. A larger sweep would justify a tracking framework.
-- **No further model tuning.** Three levers showed the ceiling; more backbones or
-  losses have diminishing returns.
-- **Cross-dataset generalization (Bonn sugar beets)** is open as future work. It
-  needs label-scheme and spectral remapping, and a weed-only framing would
-  isolate generalization from class mismatch.
+- **No further model tuning.** Four refuted levers plus a still-climbing
+  learning curve say the remaining model-side ideas have diminishing returns.
+- **Cross-dataset generalization (Bonn sugar beets)** is open as future work,
+  and is now the sharpest version of "more data": the learning curve says
+  volume helps, and a second region attacks the diversity confound too. It
+  needs label-scheme and spectral remapping first.
 - **Edge-guided segmentation** (a boundary loss or edge branch) could target the
   fine-structure errors, but faces the same data ceiling.
 - **TensorRT 10.3 vs newer releases.** The engines were built and measured on
-  JetPack 6.2. Rebuilding on a newer JetPack would isolate how much the stack
+  JetPack 6.2.1. Rebuilding on a newer JetPack would isolate how much the stack
   alone improves latency, with no model changes.
 
 ## Reproducibility
@@ -224,6 +251,11 @@ uv run scripts/train.py                 # train (config in the script header)
 uv run scripts/evaluate.py --run focal_dice_s42 --split test
 uv run pytest                           # run the test suite
 ```
+
+The learning curve reproduces with `uv run scripts/make_learning_curve_splits.py`
+followed by training runs at each fraction (epoch counts per fraction in the
+learning-curve ADR). Article figures regenerate with
+`uv run scripts/make_figures.py`.
 
 Jetson deployment (build engines and benchmark on the device) is documented in
 `docs/deployment_runbook.md`.
